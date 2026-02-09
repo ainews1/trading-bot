@@ -1,25 +1,38 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
 venv/
+ENV/
 
 # Logs
 *.log
 bot_err.log
 bot_out.log
 
-# State & data
+# State & Data
 paper_state.json
-*.csv
+historical_data.csv
+backtest_trades.csv
 
 # Secrets
 .env
+.env.*
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-# Temp
+# Temp files
 *.json
 !package.json
+
+# OS
+.DS_Store
+Thumbs.db
