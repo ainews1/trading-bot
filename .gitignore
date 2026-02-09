@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs
+*.log
+bot_err.log
+bot_out.log
+
+# State & data
+paper_state.json
+*.csv
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+*.json
+!package.json
