@@ -413,7 +413,7 @@ class BulldogStrategy:
                 score += 0.15
             else:
                 score += 0.05
-        except:
+        except Exception:
             score += 0.05
         
         # 5. Neck breaks above back
@@ -443,13 +443,36 @@ class BulldogStrategy:
         
         return contracts
     
+    def detect_macro_trend(self, df: pd.DataFrame, ema_period: int = 50) -> str:
+        """
+        Detect macro trend using EMA
+        Returns: 'BULL', 'BEAR', or 'NEUTRAL'
+        """
+        if len(df) < ema_period:
+            return 'NEUTRAL'
+        
+        # Calculate EMA
+        ema = df['close'].ewm(span=ema_period, adjust=False).mean()
+        current_price = df['close'].iloc[-1]
+        current_ema = ema.iloc[-1]
+        
+        # Simple check: price vs EMA
+        # Bull: price above EMA
+        if current_price > current_ema:
+            return 'BULL'
+        # Bear: price below EMA
+        else:
+            return 'BEAR'
+    
     def analyze(
         self,
         df: pd.DataFrame,
         account_balance: float
     ) -> Optional[TradeSignal]:
         """
-        Analyze for Bulldog pattern and generate trade signal
+        Analyze for Bulldog/Turtle pattern and generate trade signal
+        - Bulldog (LONG) only in BULL market
+        - Turtle/Inverse (SHORT) only in BEAR market
         """
         if len(df) < self.lookback_period:
             logger.warning(f"Insufficient data: {len(df)} candles, need {self.lookback_period}")
@@ -457,98 +480,129 @@ class BulldogStrategy:
         
         current_price = df['close'].iloc[-1]
         
-        # Try to detect bulldog (LONG)
-        bulldog = self.detect_bulldog(df)
-        if bulldog:
-            logger.info(f"🐕 BULLDOG DETECTED! Strength: {bulldog.pattern_strength:.2f}")
-            logger.info(f"  First low: {bulldog.first_low_price:.2f}")
-            logger.info(f"  Back high: {bulldog.back_high_price:.2f}")
-            logger.info(f"  Double bottom: {bulldog.second_low_price:.2f}")
-            logger.info(f"  Neck high: {bulldog.neck_high_price:.2f}")
-            logger.info(f"  Head low: {bulldog.head_low_price:.2f}")
-            
-            # Check entry conditions
-            entry_valid = False
-            
-            if self.entry_on_pullback:
-                # Entry on head pullback - price should be near head low and starting to rise
-                recent_low = df['low'].iloc[-3:].min()
-                price_near_head = abs(current_price - bulldog.head_low_price) / current_price < 0.01
-                price_bouncing = current_price > recent_low
-                entry_valid = price_near_head and price_bouncing
-            
-            if self.entry_on_breakout and not entry_valid:
-                # Entry on breakout above neck high
-                entry_valid = current_price > bulldog.neck_high_price * 1.001
-            
-            if entry_valid:
-                # Calculate stop loss
-                if self.stop_loss_below_double_bottom:
-                    stop_loss = min(bulldog.first_low_price, bulldog.second_low_price) * 0.998
-                else:
-                    # Use 61.8% fib level
-                    fib_range = bulldog.neck_high_price - bulldog.second_low_price
-                    stop_loss = bulldog.neck_high_price - (fib_range * self.stop_loss_fib_level)
-                
-                # Calculate take profit using Fibonacci extensions
-                # From lowest low to back high
-                lowest_low = min(bulldog.first_low_price, bulldog.second_low_price)
-                fib_base = bulldog.back_high_price - lowest_low
-                take_profit = bulldog.back_high_price + (fib_base * self.take_profit_fib_levels[0])
-                
-                position_size = self.calculate_position_size(
-                    account_balance, current_price, stop_loss
-                )
-                
-                return TradeSignal(
-                    signal=Signal.LONG,
-                    entry_price=current_price,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    position_size=position_size,
-                    reason=f"BULLDOG LONG: Pattern strength {bulldog.pattern_strength:.0%}, "
-                           f"Double bottom @ {bulldog.second_low_price:.2f}"
-                )
+        # Detect macro trend first
+        macro_trend = self.detect_macro_trend(df)
+        logger.info(f"Macro trend: {macro_trend} | Price: {current_price:.2f}")
         
-        # Try to detect inverse bulldog (SHORT)
-        inverse = self.detect_inverse_bulldog(df)
-        if inverse:
-            logger.info(f"🐕 INVERSE BULLDOG DETECTED! Strength: {inverse.pattern_strength:.2f}")
-            
-            entry_valid = False
-            
-            if self.entry_on_pullback:
-                recent_high = df['high'].iloc[-3:].max()
-                price_near_head = abs(current_price - inverse.head_low_price) / current_price < 0.01
-                price_dropping = current_price < recent_high
-                entry_valid = price_near_head and price_dropping
-            
-            if self.entry_on_breakout and not entry_valid:
-                entry_valid = current_price < inverse.neck_high_price * 0.999
-            
-            if entry_valid:
-                # Stop loss above double top
-                stop_loss = max(inverse.first_low_price, inverse.second_low_price) * 1.002
+        # Only look for Bulldog (LONG) in BULL market
+        if macro_trend == 'BULL':
+            bulldog = self.detect_bulldog(df)
+            if bulldog:
+                logger.info(f"BULLDOG DETECTED! Strength: {bulldog.pattern_strength:.2f}")
+                logger.info(f"  First low: {bulldog.first_low_price:.2f}")
+                logger.info(f"  Back high: {bulldog.back_high_price:.2f}")
+                logger.info(f"  Double bottom: {bulldog.second_low_price:.2f}")
+                logger.info(f"  Neck high: {bulldog.neck_high_price:.2f}")
+                logger.info(f"  Head low: {bulldog.head_low_price:.2f}")
                 
-                # Take profit using extensions
-                highest_high = max(inverse.first_low_price, inverse.second_low_price)
-                fib_base = highest_high - inverse.back_high_price
-                take_profit = inverse.back_high_price - (fib_base * self.take_profit_fib_levels[0])
+                # Check entry conditions
+                entry_valid = False
                 
-                position_size = self.calculate_position_size(
-                    account_balance, current_price, stop_loss
-                )
+                if self.entry_on_pullback:
+                    # Entry on head pullback - price should be near head low and starting to rise
+                    recent_low = df['low'].iloc[-3:].min()
+                    price_near_head = abs(current_price - bulldog.head_low_price) / current_price < 0.01
+                    price_bouncing = current_price > recent_low
+                    entry_valid = price_near_head and price_bouncing
                 
-                return TradeSignal(
-                    signal=Signal.SHORT,
-                    entry_price=current_price,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    position_size=position_size,
-                    reason=f"INVERSE BULLDOG SHORT: Pattern strength {inverse.pattern_strength:.0%}"
-                )
+                if self.entry_on_breakout and not entry_valid:
+                    # Entry on breakout above neck high
+                    entry_valid = current_price > bulldog.neck_high_price * 1.001
+                
+                if entry_valid:
+                    # Calculate stop loss
+                    if self.stop_loss_below_double_bottom:
+                        stop_loss = min(bulldog.first_low_price, bulldog.second_low_price) * 0.998
+                    else:
+                        # Use 61.8% fib level
+                        fib_range = bulldog.neck_high_price - bulldog.second_low_price
+                        stop_loss = bulldog.neck_high_price - (fib_range * self.stop_loss_fib_level)
+                    
+                    # Calculate take profit using Fibonacci extensions
+                    # From lowest low to back high
+                    lowest_low = min(bulldog.first_low_price, bulldog.second_low_price)
+                    fib_base = bulldog.back_high_price - lowest_low
+                    take_profit = bulldog.back_high_price + (fib_base * self.take_profit_fib_levels[0])
+                    
+                    # CRITICAL: Only enter if TP is above current price for LONG
+                    if take_profit <= current_price:
+                        logger.info(f"Skipping LONG: TP {take_profit:.2f} <= entry {current_price:.2f}")
+                        return None
+                    
+                    # Also check risk/reward ratio (at least 1:1)
+                    risk = current_price - stop_loss
+                    reward = take_profit - current_price
+                    if reward < risk:
+                        logger.info(f"Skipping LONG: R:R too low ({reward:.2f}:{risk:.2f})")
+                        return None
+                    
+                    position_size = self.calculate_position_size(
+                        account_balance, current_price, stop_loss
+                    )
+                    
+                    return TradeSignal(
+                        signal=Signal.LONG,
+                        entry_price=current_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        position_size=position_size,
+                        reason=f"BULLDOG LONG: Pattern strength {bulldog.pattern_strength:.0%}, "
+                               f"Double bottom @ {bulldog.second_low_price:.2f}"
+                    )
         
-        logger.info(f"No Bulldog pattern detected. Price: {current_price:.2f}")
+        # Only look for Turtle/Inverse Bulldog (SHORT) in BEAR market
+        if macro_trend == 'BEAR':
+            inverse = self.detect_inverse_bulldog(df)
+            if inverse:
+                logger.info(f"🐢 TURTLE (INVERSE) DETECTED! Strength: {inverse.pattern_strength:.2f}")
+                
+                entry_valid = False
+                
+                if self.entry_on_pullback:
+                    recent_high = df['high'].iloc[-3:].max()
+                    price_near_head = abs(current_price - inverse.head_low_price) / current_price < 0.01
+                    price_dropping = current_price < recent_high
+                    entry_valid = price_near_head and price_dropping
+                
+                if self.entry_on_breakout and not entry_valid:
+                    entry_valid = current_price < inverse.neck_high_price * 0.999
+                
+                if entry_valid:
+                    # Stop loss above double top
+                    stop_loss = max(inverse.first_low_price, inverse.second_low_price) * 1.002
+                    
+                    # Take profit using extensions
+                    highest_high = max(inverse.first_low_price, inverse.second_low_price)
+                    fib_base = highest_high - inverse.back_high_price
+                    take_profit = inverse.back_high_price - (fib_base * self.take_profit_fib_levels[0])
+                    
+                    # CRITICAL: Only enter if TP is below current price for SHORT
+                    if take_profit >= current_price:
+                        logger.info(f"Skipping SHORT: TP {take_profit:.2f} >= entry {current_price:.2f}")
+                        return None
+                    
+                    # Also check risk/reward ratio (at least 1:1)
+                    risk = stop_loss - current_price
+                    reward = current_price - take_profit
+                    if reward < risk:
+                        logger.info(f"Skipping SHORT: R:R too low ({reward:.2f}:{risk:.2f})")
+                        return None
+                    
+                    position_size = self.calculate_position_size(
+                        account_balance, current_price, stop_loss
+                    )
+                    
+                    return TradeSignal(
+                        signal=Signal.SHORT,
+                        entry_price=current_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        position_size=position_size,
+                        reason=f"TURTLE SHORT: Pattern strength {inverse.pattern_strength:.0%}"
+                    )
+        
+        # No pattern found or neutral market
+        logger.info(f"No valid pattern in {macro_trend} market. Price: {current_price:.2f}")
         return None
 
 

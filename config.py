@@ -19,7 +19,7 @@ class Config:
     # ===================
     # STRATEGY SELECTION
     # ===================
-    STRATEGY: str = "bulldog"  # Options: "bulldog", "ema_rsi"
+    STRATEGY: str = "sqzmom_smc"  # Options: "bulldog", "ema_rsi", "donchian", "vwap", "orderflow", "multi", "probability", "sqzmom_smc"
     
     # ===================
     # API Configuration
@@ -31,9 +31,9 @@ class Config:
     # Trading Parameters
     # ===================
     SYMBOL: str = "BTC/USDT:USDT"
-    TIMEFRAME: str = "5m"
-    LEVERAGE: int = 5
-    MARGIN_MODE: str = "isolated"
+    TIMEFRAME: str = "5m"  # 5m aggressive scalping
+    LEVERAGE: int = 10
+    MARGIN_MODE: str = "cross"
     
     # ===================
     # BULLDOG Strategy Parameters
@@ -61,11 +61,20 @@ class Config:
     # ===================
     # Risk Management
     # ===================
-    RISK_PER_TRADE: float = 0.02  # 2% of account per trade
-    STOP_LOSS_PCT: float = 0.03   # 3% stop (fallback)
-    TAKE_PROFIT_PCT: float = 0.02 # 2% profit (fallback)
-    MAX_DAILY_LOSS: float = 0.06  # 6% max daily loss
+    RISK_PER_TRADE: float = 0.03  # 3% of account per trade
+    STOP_LOSS_PCT: float = 0.015  # 1.5% stop (tighter for scalping)
+    TAKE_PROFIT_PCT: float = 0.01 # 1% profit (quick exits)
+    MAX_DAILY_LOSS: float = 0.10  # 10% max daily loss (more room for scalping)
     
+    # ===================
+    # Squeeze Momentum Parameters
+    # ===================
+    SQZ_BB_LENGTH: int = 12       # Shorter for 5m scalping
+    SQZ_BB_MULT: float = 1.5      # Tighter bands = more signals
+    SQZ_KC_LENGTH: int = 12
+    SQZ_KC_MULT: float = 1.0      # Tighter KC = easier squeeze trigger
+    SQZ_MOM_LENGTH: int = 8       # Faster momentum
+
     # ===================
     # Logging
     # ===================

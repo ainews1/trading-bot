@@ -17,6 +17,17 @@ bot_out.log
 paper_state.json
 historical_data.csv
 backtest_trades.csv
+backtest_*_trades.csv
+
+# Runtime
+.bot.lock
+
+# Generated output
+*.png
+*.csv
+
+# IDE
+.cursor/
 
 # Secrets
 .env
