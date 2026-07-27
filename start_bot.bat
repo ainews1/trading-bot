@@ -1,5 +1,10 @@
 @echo off
+title TradingBot [4H] - validated config
 cd /d C:\Users\seemonster\trading-bot
+echo ==================================================
+echo   TRADING BOT [4H] - validated config
+echo   Folder: C:\Users\seemonster\trading-bot
+echo ==================================================
 :loop
 python bot.py
 if %ERRORLEVEL% EQU 1 (
