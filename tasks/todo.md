@@ -235,3 +235,20 @@ GO/NO-GO GATE for real money (review after 1-2 weeks of fee-aware paper):
 - Max drawdown tolerable; daily-loss cap never breached spuriously
 - Restart note: two stale 5m paper instances (PID 7716, 13824) still running —
   kill both, then start ONE instance via start_bot.bat when flat.
+
+## 2026-07-27 (later) — Dual paper instances: 4h validated vs 5m demo
+- Paper taker fee set to user's ACTUAL Poloniex USDT-M beginner tier: 0.06%/side
+  (was 0.10% conservative). Funding unchanged 0.005%/4h.
+- bot.py funding now scales by candle duration (rate is per-4h; a 5m candle
+  accrues 300/14400 of it). Smoke-tested exact for both timeframes.
+- Telegram alerts verified working (send_alert test + trade-open alert).
+- Paper state reset to fresh $1000 (backup: paper_state.json.bak_20260727_pre_reset).
+- TWO instances now run side by side, $1000 each:
+  - trading-bot/    = 4h validated config (TIMEFRAME=4h, SQZ 2.0/4.0, HTF on)
+  - trading-bot-5m/ = 5m aggressive demo (TIMEFRAME=5m, SQZ 1.2/3.6, HTF off),
+    copy of the repo, untracked; exists to demonstrate the 5m fee bleed with
+    live data. First trade: SHORT notional $20.3k on $1k equity (20x), fee $12.20.
+- Gotcha fixed: two cmd.exe auto-restart loops from double Start-Process caused
+  "duplicate" bot processes; kill the bat loop BEFORE python when stopping.
+- REVIEW in 1-2 weeks: compare net PnL after costs, win rate, and max drawdown
+  between the two instances. 4h gate: >0 expectancy over >=20 trades, WR ~45%.

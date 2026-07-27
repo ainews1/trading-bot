@@ -579,16 +579,18 @@ class TradingBot:
         pnl is the GROSS price-move PnL. Costs deducted here (entry fee was
         already charged at open):
           - exit taker fee: PAPER_TAKER_FEE x exit notional
-          - funding: PAPER_FUNDING_RATE x entry notional x candles_held
-        Matches backtest assumptions (taker 0.10% per side, funding 0.005%/4h).
+          - funding: PAPER_FUNDING_RATE x entry notional x 4h-periods held
+        PAPER_FUNDING_RATE is per 4h; candles_held counts TIMEFRAME candles,
+        so it is scaled by candle duration (a 5m candle = 300/14400 of 4h).
         """
         pos = self.paper_position or {}
         entry_notional = pos.get("entry_price", 0.0) * pos.get("size", 0.0)
         exit_notional = entry_notional + pnl  # price move applied to the position
         exit_fee = exit_notional * config.PAPER_TAKER_FEE
-        funding = (
-            entry_notional * config.PAPER_FUNDING_RATE * pos.get("candles_held", 0)
+        funding_per_candle = (
+            config.PAPER_FUNDING_RATE * self._timeframe_seconds() / 14400
         )
+        funding = entry_notional * funding_per_candle * pos.get("candles_held", 0)
 
         net_pnl = pnl - exit_fee - funding
         total_costs = pos.get("entry_fee", 0.0) + exit_fee + funding
