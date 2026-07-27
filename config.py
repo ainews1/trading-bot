@@ -45,7 +45,7 @@ class Config:
     # Paper mode previously modeled zero costs, which hid the 5m fee catastrophe
     # (+99% paper vs -393R after fees in backtest). These match the validated
     # backtest assumptions: Poloniex taker 0.10% per side, funding 0.005%/4h.
-    PAPER_TAKER_FEE: float = 0.001  # 0.10% of notional per side
+    PAPER_TAKER_FEE: float = 0.0006  # Poloniex USDT-M beginner tier taker 0.06%/side
     PAPER_FUNDING_RATE: float = 0.00005  # 0.005% of notional per 4h candle held
 
     # ===================
