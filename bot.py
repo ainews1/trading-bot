@@ -347,10 +347,16 @@ class TradingBot:
             return int(tf[:-1]) * 86400
         return 300  # fallback
 
-    def fetch_ohlcv(self, limit: int = 400) -> Optional[pd.DataFrame]:
-        # 400 4h candles ≈ 66 days — enough warmup for the strategy's daily EMA20
-        # confluence filter (EMA residual weight < 0.2% at that depth).
-        """Fetch OHLCV candle data with retries. Returns CLOSED candles only."""
+    def fetch_ohlcv(self, limit: Optional[int] = None) -> Optional[pd.DataFrame]:
+        """Fetch OHLCV candle data with retries. Returns CLOSED candles only.
+
+        Default depth targets ~66 days of history (enough warmup for the
+        strategy's daily EMA20 confluence filter), so shorter timeframes fetch
+        more candles: 4h -> ~446, 30m -> 2000 (exchange cap), 5m -> 400 floor.
+        """
+        if limit is None:
+            candles_66d = int(66 * 86400 / self._timeframe_seconds()) + 50
+            limit = max(400, min(2000, candles_66d))
         for attempt in range(3):
             try:
                 ohlcv = self.exchange.fetch_ohlcv(
