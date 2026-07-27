@@ -126,6 +126,9 @@ class TradingBot:
                 kc_length=config.SQZ_KC_LENGTH,
                 kc_mult=config.SQZ_KC_MULT,
                 mom_length=config.SQZ_MOM_LENGTH,
+                sl_atr_mult=config.SQZ_SL_ATR_MULT,
+                tp_atr_mult=config.SQZ_TP_ATR_MULT,
+                htf_confluence=config.HTF_CONFLUENCE_ENABLED,
                 risk_per_trade=config.RISK_PER_TRADE,
                 leverage=config.LEVERAGE,
             )
@@ -148,14 +151,21 @@ class TradingBot:
         self.daily_pnl = 0.0
         self.daily_pnl_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         self.max_daily_loss = config.MAX_DAILY_LOSS
+        # Balance at the start of the trading day — the loss limit must be a
+        # fixed fraction of this, not of the current (already-drawn-down) balance.
+        self.daily_open_balance = 0.0
 
         # Paper trading state
         self.paper_balance = 1000.0  # Starting paper balance
         self.paper_position: Optional[Dict] = None
         self.paper_pnl = 0.0
-        
+
         # Load persisted state if exists
         self._load_state()
+
+        if self.paper_trading and self.daily_open_balance <= 0:
+            # Not in saved state — reconstruct: opening balance = current minus today's PnL
+            self.daily_open_balance = self.paper_balance - self.daily_pnl
         
         # Real position tracking
         self.current_position: Optional[Dict] = None
@@ -164,6 +174,7 @@ class TradingBot:
         self.market_scout = MarketScout()
         self.last_scout_time: Optional[datetime] = None
         self.scout_interval = timedelta(minutes=5)
+        self.last_snapshot = None  # most recent MarketSnapshot, used by regime gate
 
         # Prevent duplicate signals on the same candle after restart
         self._last_signal_candle: Optional[str] = None
@@ -191,6 +202,7 @@ class TradingBot:
             'paper_position': self.paper_position,
             'daily_pnl': self.daily_pnl,
             'daily_pnl_date': self.daily_pnl_date,
+            'daily_open_balance': self.daily_open_balance,
             'updated_at': datetime.now(timezone.utc).isoformat()
         }
         
@@ -226,9 +238,11 @@ class TradingBot:
             if saved_date == today:
                 self.daily_pnl = state.get('daily_pnl', 0.0)
                 self.daily_pnl_date = saved_date
+                self.daily_open_balance = state.get('daily_open_balance', 0.0)
             else:
                 self.daily_pnl = 0.0
                 self.daily_pnl_date = today
+                self.daily_open_balance = self.paper_balance
                 logger.info(f"  New trading day - daily PnL reset")
 
             logger.info(f"[STATE] Loaded saved state:")
@@ -295,8 +309,22 @@ class TradingBot:
             logger.error(f"Leverage error: {e}")
             return False
     
-    def fetch_ohlcv(self, limit: int = 250) -> Optional[pd.DataFrame]:
-        """Fetch OHLCV candle data with retries"""
+    @staticmethod
+    def _timeframe_seconds() -> int:
+        """Parse config.TIMEFRAME into seconds (e.g. '5m' -> 300)."""
+        tf = config.TIMEFRAME
+        if tf.endswith('m'):
+            return int(tf[:-1]) * 60
+        if tf.endswith('h'):
+            return int(tf[:-1]) * 3600
+        if tf.endswith('d'):
+            return int(tf[:-1]) * 86400
+        return 300  # fallback
+
+    def fetch_ohlcv(self, limit: int = 400) -> Optional[pd.DataFrame]:
+        # 400 4h candles ≈ 66 days — enough warmup for the strategy's daily EMA20
+        # confluence filter (EMA residual weight < 0.2% at that depth).
+        """Fetch OHLCV candle data with retries. Returns CLOSED candles only."""
         for attempt in range(3):
             try:
                 ohlcv = self.exchange.fetch_ohlcv(
@@ -312,7 +340,22 @@ class TradingBot:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
 
-                logger.debug(f"Fetched {len(df)} candles")
+                # Poloniex includes the still-forming candle as the last row
+                # (verified via live probe). Drop it: indicators and wick-based
+                # SL/TP checks must only ever see closed candles, matching
+                # backtest semantics.
+                interval_secs = self._timeframe_seconds()
+                current_open = pd.Timestamp(
+                    (int(time.time()) // interval_secs) * interval_secs, unit='s'
+                )
+                if len(df) > 0 and df.index[-1] >= current_open:
+                    df = df.iloc[:-1]
+
+                if len(df) == 0:
+                    logger.error("Empty OHLCV response after dropping partial candle")
+                    return None
+
+                logger.debug(f"Fetched {len(df)} closed candles")
                 return df
 
             except ccxt.RateLimitExceeded:
@@ -499,6 +542,10 @@ class TradingBot:
         self.paper_pnl += pnl
         self.daily_pnl += pnl
 
+        # Notify strategy of trade result for cooldown tracking
+        if hasattr(self.strategy, 'record_trade_result'):
+            self.strategy.record_trade_result(won=(pnl > 0))
+
         # Clear position and save state FIRST — prevents duplicate closes on restart
         self.paper_position = None
         self._save_state()
@@ -515,24 +562,54 @@ class TradingBot:
             self.daily_pnl, self.paper_pnl, paper=True,
         )
     
+    def _daily_loss_pct(self, balance: float) -> float:
+        """Today's loss as a fraction of the day-OPENING balance.
+
+        Dividing by the current balance would shrink the denominator as losses
+        mount, letting the total daily loss exceed the configured cap.
+        """
+        if self.daily_pnl >= 0:
+            return 0.0
+        denom = self.daily_open_balance if self.daily_open_balance > 0 else balance
+        if denom <= 0:
+            return 0.0
+        return -self.daily_pnl / denom
+
+    def _regime_gate(self, signal) -> Optional[str]:
+        """Return a block reason if this signal should be filtered by market regime, else None.
+
+        Uses the latest MarketScout snapshot. Fails open: if filtering is disabled
+        or no snapshot is available yet, never blocks.
+        """
+        if not getattr(config, "REGIME_FILTER_ENABLED", False):
+            return None
+        snap = self.last_snapshot
+        if snap is None:
+            return None
+
+        side = signal.signal.value  # "LONG" or "SHORT"
+
+        # Block entries in non-directional (ranging) markets — worst-performing bucket.
+        if getattr(config, "BLOCK_RANGING_REGIME", False) and snap.market_regime == "RANGING":
+            return f"RANGING regime (trend {snap.trend_direction} {snap.trend_strength:.2f})"
+
+        # Block counter-trend entries: LONG against BEAR, SHORT against BULL.
+        if getattr(config, "BLOCK_COUNTER_TREND", False):
+            min_str = getattr(config, "COUNTER_TREND_MIN_STRENGTH", 0.0)
+            if snap.trend_strength >= min_str:
+                if side == "LONG" and snap.trend_direction == "BEAR":
+                    return f"counter-trend LONG vs BEAR (strength {snap.trend_strength:.2f})"
+                if side == "SHORT" and snap.trend_direction == "BULL":
+                    return f"counter-trend SHORT vs BULL (strength {snap.trend_strength:.2f})"
+        return None
+
     def wait_for_next_candle(self):
         """Wait for the next candle close without time drift"""
         now = datetime.now(timezone.utc)
 
-        # Parse timeframe to minutes
-        tf = config.TIMEFRAME
-        if tf.endswith('m'):
-            interval_minutes = int(tf[:-1])
-        elif tf.endswith('h'):
-            interval_minutes = int(tf[:-1]) * 60
-        elif tf.endswith('d'):
-            interval_minutes = int(tf[:-1]) * 1440
-        else:
-            interval_minutes = 5  # fallback
-
         # Calculate next interval boundary using epoch math (avoids hour=24 bug)
         epoch = now.timestamp()
-        interval_secs = interval_minutes * 60
+        interval_secs = self._timeframe_seconds()
         next_boundary = ((int(epoch) // interval_secs) + 1) * interval_secs
         wait_seconds = next_boundary - epoch
 
@@ -580,6 +657,7 @@ class TradingBot:
                         report = self.market_scout.format_snapshot_report(snapshot)
                         logger.info("\n" + report)
                         self.last_scout_time = now
+                        self.last_snapshot = snapshot
                 
                 logger.info(f"Current price: {current_price:.2f}")
                 
@@ -595,12 +673,15 @@ class TradingBot:
                     logger.info(f"[DAILY RESET] New trading day ({today}). Daily PnL reset from ${self.daily_pnl:.2f} to $0.00")
                     self.daily_pnl = 0.0
                     self.daily_pnl_date = today
+                    self.daily_open_balance = self.get_account_balance()
                     self._save_state()
 
                 # Check daily loss limit
                 balance = self.get_account_balance()
+                if self.daily_open_balance <= 0:
+                    self.daily_open_balance = balance
                 if balance > 0:
-                    daily_loss_pct = -self.daily_pnl / balance if self.daily_pnl < 0 else 0
+                    daily_loss_pct = self._daily_loss_pct(balance)
                     if daily_loss_pct >= self.max_daily_loss:
                         logger.warning(f"[!] Daily loss limit reached ({daily_loss_pct:.1%}). Trading paused until next day.")
                         self.wait_for_next_candle()
@@ -616,6 +697,10 @@ class TradingBot:
                 elif not self.paper_trading and self.current_position and self.current_position.get('sl_order_id'):
                     # Position closed — cancel remaining SL/TP orders (OCO)
                     self._cancel_remaining_orders()
+                    # Track trade result for cooldown (approximate from balance change)
+                    if hasattr(self.strategy, 'record_trade_result'):
+                        # If we can't determine PnL, assume loss (conservative)
+                        self.strategy.record_trade_result(won=False)
                     self.current_position = None
                 
                 # Get account balance
@@ -624,6 +709,13 @@ class TradingBot:
                 
                 # Analyze and generate signal
                 signal = self.strategy.analyze(df, balance)
+
+                # Regime gate: drop counter-trend / ranging-market entries
+                if signal:
+                    block_reason = self._regime_gate(signal)
+                    if block_reason:
+                        logger.info(f"[REGIME BLOCK] {signal.signal.value} entry filtered — {block_reason}")
+                        signal = None
 
                 if signal:
                     # Deduplicate: skip if we already traded on this candle

@@ -31,7 +31,11 @@ class Config:
     # Trading Parameters
     # ===================
     SYMBOL: str = "BTC/USDT:USDT"
-    TIMEFRAME: str = "5m"  # 5m aggressive scalping
+    # 5m per user decision 2026-06-11 (rolled back from 4h). NOTE: walk-forward
+    # backtest (backtest_entry_filters.py) shows 5m is negative-expectancy after
+    # fees; the validated profitable config is TIMEFRAME="4h" + SQZ mults 2.0/4.0
+    # + HTF_CONFLUENCE_ENABLED=True. Flip those four values to restore it.
+    TIMEFRAME: str = "5m"
     LEVERAGE: int = 10
     MARGIN_MODE: str = "cross"
     
@@ -61,19 +65,33 @@ class Config:
     # ===================
     # Risk Management
     # ===================
-    RISK_PER_TRADE: float = 0.03  # 3% of account per trade
+    RISK_PER_TRADE: float = 0.02  # 2% of account per trade (reduced from 3%)
     STOP_LOSS_PCT: float = 0.015  # 1.5% stop (tighter for scalping)
     TAKE_PROFIT_PCT: float = 0.01 # 1% profit (quick exits)
-    MAX_DAILY_LOSS: float = 0.10  # 10% max daily loss (more room for scalping)
+    MAX_DAILY_LOSS: float = 0.08  # 8% max daily loss (tighter protection)
     
     # ===================
-    # Squeeze Momentum Parameters
+    # Squeeze Momentum Parameters (AGGRESSIVE)
     # ===================
-    SQZ_BB_LENGTH: int = 12       # Shorter for 5m scalping
-    SQZ_BB_MULT: float = 1.5      # Tighter bands = more signals
-    SQZ_KC_LENGTH: int = 12
-    SQZ_KC_MULT: float = 1.0      # Tighter KC = easier squeeze trigger
-    SQZ_MOM_LENGTH: int = 8       # Faster momentum
+    SQZ_BB_LENGTH: int = 16       # Shorter BB = more responsive squeezes
+    SQZ_BB_MULT: float = 1.8      # Tighter bands = squeeze fires more often
+    SQZ_KC_LENGTH: int = 16       # Shorter KC = faster detection
+    SQZ_KC_MULT: float = 1.0      # Tighter KC = many more squeezes detected
+    SQZ_MOM_LENGTH: int = 8        # Shorter momentum = faster signals
+    SQZ_SL_ATR_MULT: float = 1.2   # 4h-validated value: 2.0
+    SQZ_TP_ATR_MULT: float = 3.6   # 4h-validated value: 4.0
+    HTF_CONFLUENCE_ENABLED: bool = False  # 4h-validated value: True (daily EMA20 filter)
+
+    # ===================
+    # Regime Filter (entry gating)
+    # ===================
+    # Data showed counter-trend entries and ranging-market entries are the bot's
+    # losing buckets. These gates block them at the orchestration layer using the
+    # MarketScout snapshot. Toggle off to restore prior (unfiltered) behavior.
+    REGIME_FILTER_ENABLED: bool = True
+    BLOCK_COUNTER_TREND: bool = True       # block LONG in BEAR / SHORT in BULL
+    BLOCK_RANGING_REGIME: bool = True      # block entries when regime == RANGING
+    COUNTER_TREND_MIN_STRENGTH: float = 0.0  # only block counter-trend if trend_strength >= this
 
     # ===================
     # Logging

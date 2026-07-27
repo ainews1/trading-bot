@@ -68,9 +68,9 @@ class SqzMomSmcStrategy:
 
     Risk management:
       - ATR-based SL/TP
-      - Squeeze fire: 1:3.0 R:R
-      - Mom accel: 1:2.4 R:R
-      - Trend cont: 1:2.1 R:R with tightest SL
+      - Squeeze fire: 1:2.5 R:R
+      - Mom accel: 1:2.0 R:R
+      - Trend cont: 1:1.8 R:R with tightest SL
       - 2% risk per trade
       - 4-loss consecutive cooldown (3 candles)
     """
@@ -88,12 +88,10 @@ class SqzMomSmcStrategy:
         ema_tolerance_pct: float = 0.001,  # Allow 0.1% deviation from EMA
         # Risk
         atr_period: int = 10,  # Shorter ATR for more responsive SL/TP
-        sl_atr_mult: float = 2.0,
-        tp_atr_mult: float = 4.0,
+        sl_atr_mult: float = 1.2,
+        tp_atr_mult: float = 3.0,
         risk_per_trade: float = 0.02,
         leverage: int = 4,
-        # Higher-timeframe confluence
-        htf_confluence: bool = True,  # only trade in the direction of the daily EMA20
         # Cooldown
         max_consecutive_losses: int = 4,  # More lenient before cooldown
         cooldown_candles: int = 3,  # Only 3 candles (15 min on 5m) cooldown
@@ -121,17 +119,6 @@ class SqzMomSmcStrategy:
         self.volume_confirm_mult = volume_confirm_mult
         self.min_smc_bias = min_smc_bias
         self.ema_tolerance_pct = ema_tolerance_pct
-        self.htf_confluence = htf_confluence
-
-        # Momentum = linear-regression value at the window's last bar, which is a
-        # fixed linear combination of the window: w_j = 1/m + (j - x̄)(m-1 - x̄)/Sxx.
-        # Precomputing the weights replaces a per-bar np.polyfit loop with one
-        # sliding-window dot product (identical output, ~100x faster).
-        m = self.mom_length
-        x = np.arange(m, dtype=float)
-        x_mean = x.mean()
-        sxx = ((x - x_mean) ** 2).sum()
-        self._mom_weights = 1.0 / m + (x - x_mean) * (m - 1 - x_mean) / sxx
 
         # SMC engine for structural analysis
         self.smc = SmartMoneyEngine(swing_lookback=smc_swing_lookback)
@@ -139,20 +126,6 @@ class SqzMomSmcStrategy:
         # Cooldown state
         self._consecutive_losses = 0
         self._cooldown_remaining = 0
-
-    def daily_ema(self, df: pd.DataFrame, span: int = 20) -> Optional[float]:
-        """EMA of daily closes using only FULLY CLOSED days (lagged 1 day, no lookahead).
-
-        Returns None (fail open) if the index isn't datetime or history is too short.
-        """
-        try:
-            daily = df["close"].resample("1D").last()
-        except TypeError:
-            return None
-        if len(daily) < 2:
-            return None
-        val = daily.ewm(span=span, adjust=False).mean().shift(1).iloc[-1]
-        return None if pd.isna(val) else float(val)
 
     def record_trade_result(self, won: bool):
         """Call this after a trade closes to update cooldown tracking."""
@@ -176,20 +149,11 @@ class SqzMomSmcStrategy:
         low = df["low"]
 
         # True Range / ATR
-        prev_close = close.shift(1)
-        tr = pd.Series(
-            np.maximum(
-                (high - low).to_numpy(),
-                np.maximum(
-                    (high - prev_close).abs().to_numpy(),
-                    (low - prev_close).abs().to_numpy(),
-                ),
-            ),
-            index=df.index,
-        )
-        # First bar has no prev close; DataFrame.max(axis=1) skipped that NaN
-        # and fell back to high-low — preserve that behavior.
-        tr = tr.fillna(high - low)
+        tr = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs(),
+        ], axis=1).max(axis=1)
         atr = tr.rolling(self.kc_length).mean()
 
         # Bollinger Bands
@@ -211,12 +175,13 @@ class SqzMomSmcStrategy:
         delta = close - midline
 
         mom_values = np.full(len(df), np.nan)
-        if len(df) >= self.mom_length:
-            windows = np.lib.stride_tricks.sliding_window_view(
-                delta.to_numpy(), self.mom_length
-            )
-            # NaN inside a window propagates to NaN, matching the old skip behavior
-            mom_values[self.mom_length - 1:] = windows @ self._mom_weights
+        x = np.arange(self.mom_length)
+        for i in range(self.mom_length - 1, len(df)):
+            y = delta.iloc[i - self.mom_length + 1 : i + 1].values
+            if np.any(np.isnan(y)):
+                continue
+            coeffs = np.polyfit(x, y, 1)
+            mom_values[i] = np.polyval(coeffs, self.mom_length - 1)
 
         df["sqz_mom"] = mom_values
         df["sqz_mom_prev"] = pd.Series(mom_values).shift(1).values
@@ -348,20 +313,6 @@ class SqzMomSmcStrategy:
             logger.info(f"    [BLOCKED] SHORT rejected: price {price:.0f} > EMA {ema_trend:.0f} + tol")
             return None
 
-        # === FILTER 1B: DAILY EMA20 CONFLUENCE (HTF trend alignment) ===
-        # Walk-forward validated (backtest_entry_filters.py): this filter is what
-        # flips the 4h edge positive after taker fees. Longs only above the daily
-        # EMA20, shorts only below. Fails open if daily history is unavailable.
-        if self.htf_confluence:
-            htf_ema = self.daily_ema(df)
-            if htf_ema is not None:
-                if direction == "LONG" and price < htf_ema:
-                    logger.info(f"    [BLOCKED] LONG rejected: price {price:.0f} < daily EMA20 {htf_ema:.0f}")
-                    return None
-                if direction == "SHORT" and price > htf_ema:
-                    logger.info(f"    [BLOCKED] SHORT rejected: price {price:.0f} > daily EMA20 {htf_ema:.0f}")
-                    return None
-
         # === FILTER 2: SMC BIAS CONFIRMATION ===
         # Don't trade against very strong SMC bias (loosened thresholds)
         smc_block_threshold = -60 if signal_type == "SQUEEZE_FIRE" else -50
@@ -417,10 +368,10 @@ class SqzMomSmcStrategy:
             tp_mult = self.tp_atr_mult
         elif signal_type == "MOM_ACCEL":
             sl_mult = self.sl_atr_mult * 0.85
-            tp_mult = self.tp_atr_mult * 0.67  # ~1:2.4 R:R
+            tp_mult = self.tp_atr_mult * 0.67  # ~1:2.0 R:R
         else:  # TREND_CONT — tightest SL, quick profit
             sl_mult = self.sl_atr_mult * 0.7
-            tp_mult = self.tp_atr_mult * 0.50  # ~1:2.1 R:R
+            tp_mult = self.tp_atr_mult * 0.50  # ~1:1.8 R:R
 
         if direction == "LONG":
             stop_loss = price - (atr * sl_mult)
