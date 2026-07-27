@@ -210,3 +210,28 @@ User asked for "+$100 per win" (longer profit runs). Backtested TP stretch on 5m
 TP 12x ATR gives exactly +$99/win but win% drops to 12.3%, still -$168/day expectancy
 (every TP variant negative: 3.6x/-439, 7.2x/-259, 12x/-168, 24x/-84 $/day, pre-cap).
 NOT applied — awaiting explicit user confirmation since it worsens losses.
+
+# Session 2026-07-27 — Fee-aware paper + 4h validated config (pre-live gate)
+User wants to go live with real money. Evidence review: paper +99% ($1000->$1993,
+1936 trades, avg +$0.51/trade) was an illusion — paper modeled ZERO costs while
+live taker fees alone would be ~$142/trade at 5m position sizes. User chose
+FEE-AWARE PAPER FIRST over going live immediately.
+
+Shipped:
+- config.py: PAPER_TAKER_FEE=0.001 (0.10%/side), PAPER_FUNDING_RATE=0.00005
+  (0.005%/4h) — matches backtest_entry_filters.py assumptions
+- config.py: flipped to 4h validated config (TIMEFRAME=4h, SQZ 2.0/4.0,
+  HTF_CONFLUENCE_ENABLED=True)
+- bot.py: entry taker fee deducted at open; exit fee + funding (per candle held)
+  deducted at close; net PnL drives win/loss, cooldown, telegram, daily-loss cap;
+  candles_held persisted in paper_state.json
+
+Verified: py_compile OK; test_bot_fixes 11/11; test_htf_confluence 6/6;
+test_regime_gate 8/8; squeeze equivalence PASS; fee smoke test exact to the cent.
+
+GO/NO-GO GATE for real money (review after 1-2 weeks of fee-aware paper):
+- Net expectancy > 0 after fees+funding over >= 20 trades
+- Realized win rate ~45% (backtest: 45.2%); abandon if < 35%
+- Max drawdown tolerable; daily-loss cap never breached spuriously
+- Restart note: two stale 5m paper instances (PID 7716, 13824) still running —
+  kill both, then start ONE instance via start_bot.bat when flat.
