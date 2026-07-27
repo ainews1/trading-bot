@@ -48,6 +48,9 @@ class Config:
     PAPER_TAKER_FEE: float = 0.0006  # Poloniex USDT-M beginner tier taker 0.06%/side
     PAPER_FUNDING_RATE: float = 0.00005  # 0.005% of notional per 4h candle held
 
+    # Telegram alert prefix — tells instances apart in a shared chat
+    INSTANCE_TAG: str = "4H"
+
     # ===================
     # BULLDOG Strategy Parameters
     # ===================
