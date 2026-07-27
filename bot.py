@@ -169,6 +169,15 @@ class TradingBot:
         self.paper_position: Optional[Dict] = None
         self.paper_pnl = 0.0
 
+        # Prevent duplicate signals on the same candle after restart.
+        # NOTE: must be initialized BEFORE _load_state() so a persisted value
+        # is not overwritten.
+        self._last_signal_candle: Optional[str] = None
+        # Until the first candle is fetched, mark the bot as just-started:
+        # the pre-existing last closed candle is never traded (no instant
+        # re-entries on restart), only candles that close while running.
+        self._just_started: bool = True
+
         # Load persisted state if exists
         self._load_state()
 
@@ -184,9 +193,6 @@ class TradingBot:
         self.last_scout_time: Optional[datetime] = None
         self.scout_interval = timedelta(minutes=5)
         self.last_snapshot = None  # most recent MarketSnapshot, used by regime gate
-
-        # Prevent duplicate signals on the same candle after restart
-        self._last_signal_candle: Optional[str] = None
 
         logger.info("=" * 60)
         logger.info("TRADING BOT INITIALIZED")
@@ -214,6 +220,7 @@ class TradingBot:
             "daily_pnl": self.daily_pnl,
             "daily_pnl_date": self.daily_pnl_date,
             "daily_open_balance": self.daily_open_balance,
+            "last_signal_candle": self._last_signal_candle,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -242,6 +249,7 @@ class TradingBot:
             self.paper_balance = state.get("paper_balance", 1000.0)
             self.paper_pnl = state.get("paper_pnl", 0.0)
             self.paper_position = state.get("paper_position")
+            self._last_signal_candle = state.get("last_signal_candle")
 
             # Restore daily PnL tracking (reset if it's a new day)
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -714,6 +722,17 @@ class TradingBot:
 
                 current_price = df["close"].iloc[-1]
 
+                # Startup guard: never trade a candle that closed before this
+                # process started. Marks it as already-seen so only candles
+                # closing while the bot runs can trigger entries.
+                if self._just_started:
+                    self._last_signal_candle = str(df.index[-1])
+                    self._just_started = False
+                    logger.info(
+                        f"[STARTUP] Skipping pre-existing candle "
+                        f"{self._last_signal_candle} — trading new closes only"
+                    )
+
                 # Market scouting - comprehensive market analysis
                 now = datetime.now(timezone.utc)
                 should_scout = (
@@ -814,6 +833,7 @@ class TradingBot:
                         success = self.execute_trade(signal)
                         if success:
                             self._last_signal_candle = candle_key
+                            self._save_state()  # persist dedup key (paper)
                             logger.info("Trade executed successfully")
                         else:
                             logger.error("Trade execution failed")
